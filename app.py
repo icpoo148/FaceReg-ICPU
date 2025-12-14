@@ -1,3 +1,4 @@
+import uuid
 import streamlit as st
 from deepface import DeepFace
 import cv2
@@ -28,22 +29,27 @@ def load_database():
 def save_to_cloud(name, role, company, image, embedding):
     """Upload image to Bucket and Data to Table"""
     
+    # --- FIX: Use a random safe filename instead of the user's name ---
+    # This prevents errors with special characters or hidden spaces
+    safe_filename = f"{uuid.uuid4()}.jpg"
+    
     # A. Upload Image
-    filename = f"{name}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
     is_success, buffer = cv2.imencode(".jpg", cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
     
     if is_success:
         file_bytes = buffer.tobytes()
-        supabase.storage.from_("photos").upload(filename, file_bytes, {"content-type": "image/jpeg"})
-        image_url = supabase.storage.from_("photos").get_public_url(filename)
+        # Upload using the safe random filename
+        supabase.storage.from_("photos").upload(safe_filename, file_bytes, {"content-type": "image/jpeg"})
+        
+        # Get the URL
+        image_url = supabase.storage.from_("photos").get_public_url(safe_filename)
     else:
         st.error("Failed to process image")
         return
 
     # B. Upload Data
-    # DeepFace embeddings are Python lists, easy to save as JSON
     data_entry = {
-        "name": name,
+        "name": name,   # The real name is stored here safely
         "role": role,
         "company": company,
         "image_url": image_url,
