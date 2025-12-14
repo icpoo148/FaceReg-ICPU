@@ -1,4 +1,3 @@
-import uuid
 import streamlit as st
 from deepface import DeepFace
 import cv2
@@ -6,6 +5,7 @@ import numpy as np
 from supabase import create_client, Client
 import json
 from datetime import datetime
+import uuid
 
 # --- 1. SETUP CLOUD CONNECTION ---
 try:
@@ -21,27 +21,24 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def load_database():
     """Fetch all people from Supabase"""
-    # Fetch data
     response = supabase.table('people').select("*").execute()
-    data = response.data
-    return data
+    return response.data
 
 def save_to_cloud(name, role, company, image, embedding):
     """Upload image to Bucket and Data to Table"""
     
-    # --- FIX: Use a random safe filename instead of the user's name ---
-    # This prevents errors with special characters or hidden spaces
+    # Generate a random safe filename (prevents errors with special characters)
     safe_filename = f"{uuid.uuid4()}.jpg"
     
     # A. Upload Image
+    # Convert numpy image to bytes
     is_success, buffer = cv2.imencode(".jpg", cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
     
     if is_success:
         file_bytes = buffer.tobytes()
-        # Upload using the safe random filename
+        # Upload to Supabase Storage
         supabase.storage.from_("photos").upload(safe_filename, file_bytes, {"content-type": "image/jpeg"})
-        
-        # Get the URL
+        # Get the Public URL
         image_url = supabase.storage.from_("photos").get_public_url(safe_filename)
     else:
         st.error("Failed to process image")
@@ -49,11 +46,11 @@ def save_to_cloud(name, role, company, image, embedding):
 
     # B. Upload Data
     data_entry = {
-        "name": name,   # The real name is stored here safely
+        "name": name,
         "role": role,
         "company": company,
         "image_url": image_url,
-        "encoding": json.dumps(embedding) 
+        "encoding": json.dumps(embedding) # Store AI vector as JSON string
     }
     
     supabase.table('people').insert(data_entry).execute()
@@ -65,7 +62,9 @@ st.title("☁️ AI Person Recognizer (DeepFace)")
 
 tab1, tab2 = st.tabs(["➕ Add New Person", "🔍 Recognize from Photo"])
 
-# TAB 1: ENROLLMENT
+# ==========================================
+# TAB 1: ENROLLMENT (Manual Add)
+# ==========================================
 with tab1:
     col1, col2 = st.columns(2)
     with col1:
@@ -84,7 +83,7 @@ with tab1:
                 img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 
                 try:
-                    # Generate AI Embedding (VGG-Face model is the industry standard)
+                    # Generate AI Embedding
                     embedding = DeepFace.represent(img_path=img_rgb, model_name="VGG-Face", enforce_detection=True)[0]["embedding"]
                     
                     save_to_cloud(new_name, new_role, new_company, img_rgb, embedding)
@@ -94,7 +93,9 @@ with tab1:
                 except Exception as e:
                     st.error(f"Error: {e}")
 
-# TAB 2: RECOGNITION
+# ==========================================
+# TAB 2: RECOGNITION & QUICK ADD
+# ==========================================
 with tab2:
     target_photo = st.file_uploader("Upload Group Photo", type=['jpg', 'png', 'jpeg'])
     
@@ -112,57 +113,72 @@ with tab2:
                 
                 try:
                     # 2. Extract Faces from Group Photo
-                    # We use 'opencv' backend because it's fast and doesn't crash cloud servers
+                    # 'opencv' backend is faster and more stable on cloud than dlib
                     faces = DeepFace.extract_faces(img_path=img_rgb, detector_backend='opencv', enforce_detection=False)
-                    
                     st.write(f"Found **{len(faces)}** faces.")
                     
-                    # 3. Process Each Face
-                    for face_obj in faces:
+                    # 3. Process Each Face found
+                    for i, face_obj in enumerate(faces):
                         detected_face = face_obj["face"]
-                        # DeepFace returns float 0-1, convert to int 0-255 for display
+                        # Convert float image (0-1) to int (0-255) for display
                         display_face = (detected_face * 255).astype(np.uint8)
                         
-                        # Get embedding for this specific face
+                        # Get embedding for this specific crop
                         try:
                             current_embedding = DeepFace.represent(img_path=display_face, model_name="VGG-Face", enforce_detection=False)[0]["embedding"]
                         except:
-                            continue # Skip if AI fails on this crop
+                            continue # Skip if AI cannot read the face
 
-                        # 4. Compare with Database (Cosine Similarity)
+                        # 4. Compare with Database
                         best_match = None
-                        lowest_distance = 1.0 # 1.0 means "Completely Different", 0.0 means "Identical"
+                        lowest_distance = 1.0 # 1.0 = different, 0.0 = same
                         
                         for person in db_data:
-                            db_emb = json.loads(person['encoding']) # Load saved list
-                            
-                            # Math: Calculate Distance
+                            db_emb = json.loads(person['encoding'])
+                            # Cosine Distance
                             a = np.array(current_embedding)
                             b = np.array(db_emb)
-                            # Cosine Distance Formula
                             dist = 1 - (np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
                             
                             if dist < lowest_distance:
                                 lowest_distance = dist
                                 best_match = person
                         
-                        # 5. Display Result
+                        # 5. Display Result Card
                         c1, c2 = st.columns([1, 3])
                         with c1:
-                            st.image(display_face, width=100)
+                            st.image(display_face, width=120, caption=f"Face #{i+1}")
                         
                         with c2:
-                            # 0.40 is the standard threshold for VGG-Face
+                            # --- MATCH FOUND (Threshold 0.40) ---
                             if lowest_distance < 0.40:
                                 st.subheader(f"✅ {best_match['name']}")
                                 st.write(f"🏢 **{best_match['company']}**")
                                 st.write(f"📋 {best_match['role']}")
-                                st.caption(f"Match Confidence: {((1-lowest_distance)*100):.1f}%")
+                                st.caption(f"Confidence: {((1-lowest_distance)*100):.1f}%")
                                 if best_match.get('image_url'):
-                                    st.image(best_match['image_url'], width=60, caption="Ref")
+                                    st.image(best_match['image_url'], width=60, caption="Reference")
+                                    
+                            # --- UNKNOWN (Quick Add Form) ---
                             else:
-                                st.subheader("❓ Unknown")
-                                st.write("Not in database")
+                                st.subheader("❓ Unknown Person")
+                                st.warning("Not in database")
+                                
+                                # Quick Add Form
+                                with st.expander(f"➕ Add Person #{i+1} to DB"):
+                                    with st.form(key=f"add_form_{i}"):
+                                        st.caption("Add details for this face:")
+                                        u_name = st.text_input("Name")
+                                        u_role = st.text_input("Role")
+                                        u_comp = st.text_input("Company")
+                                        
+                                        if st.form_submit_button("Save to Database"):
+                                            if u_name:
+                                                save_to_cloud(u_name, u_role, u_comp, display_face, current_embedding)
+                                                st.success(f"Saved {u_name}! Re-scan to see them.")
+                                            else:
+                                                st.error("Name is required.")
+
                         st.divider()
                         
                 except Exception as e:
