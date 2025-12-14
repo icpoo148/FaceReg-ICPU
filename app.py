@@ -6,6 +6,7 @@ from supabase import create_client, Client
 import json
 from datetime import datetime
 import uuid
+import time
 
 # --- 1. SETUP CLOUD CONNECTION ---
 try:
@@ -35,14 +36,18 @@ def save_to_cloud(name, role, company, image, embedding):
     is_success, buffer = cv2.imencode(".jpg", cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
     
     if is_success:
-        file_bytes = buffer.tobytes()
-        # Upload to Supabase Storage
-        supabase.storage.from_("photos").upload(safe_filename, file_bytes, {"content-type": "image/jpeg"})
-        # Get the Public URL
-        image_url = supabase.storage.from_("photos").get_public_url(safe_filename)
+        try:
+            file_bytes = buffer.tobytes()
+            # Upload to Supabase Storage
+            supabase.storage.from_("photos").upload(safe_filename, file_bytes, {"content-type": "image/jpeg"})
+            # Get the Public URL
+            image_url = supabase.storage.from_("photos").get_public_url(safe_filename)
+        except Exception as e:
+            st.error(f"Image Upload Failed: {e}")
+            return False
     else:
         st.error("Failed to process image")
-        return
+        return False
 
     # B. Upload Data
     data_entry = {
@@ -53,7 +58,13 @@ def save_to_cloud(name, role, company, image, embedding):
         "encoding": json.dumps(embedding) # Store AI vector as JSON string
     }
     
-    supabase.table('people').insert(data_entry).execute()
+    try:
+        response = supabase.table('people').insert(data_entry).execute()
+        # If RLS is blocking us, response.data might be empty or raise error
+        return True
+    except Exception as e:
+        st.error(f"Database Save Failed: {e}. (Check if RLS is disabled in Supabase!)")
+        return False
 
 # --- 3. THE APP UI ---
 
@@ -86,8 +97,13 @@ with tab1:
                     # Generate AI Embedding
                     embedding = DeepFace.represent(img_path=img_rgb, model_name="VGG-Face", enforce_detection=True)[0]["embedding"]
                     
-                    save_to_cloud(new_name, new_role, new_company, img_rgb, embedding)
-                    st.success(f"✅ Saved {new_name} to database!")
+                    # Save and Refresh
+                    success = save_to_cloud(new_name, new_role, new_company, img_rgb, embedding)
+                    if success:
+                        st.success(f"✅ Saved {new_name} to database!")
+                        time.sleep(1) # Wait for Supabase to catch up
+                        st.rerun()    # Refresh the app
+                        
                 except ValueError:
                     st.error("❌ No face detected. Please use a clear photo.")
                 except Exception as e:
@@ -174,8 +190,11 @@ with tab2:
                                         
                                         if st.form_submit_button("Save to Database"):
                                             if u_name:
-                                                save_to_cloud(u_name, u_role, u_comp, display_face, current_embedding)
-                                                st.success(f"Saved {u_name}! Re-scan to see them.")
+                                                success = save_to_cloud(u_name, u_role, u_comp, display_face, current_embedding)
+                                                if success:
+                                                    st.success(f"Saved {u_name}!")
+                                                    time.sleep(1)
+                                                    st.rerun() # Refresh to update database
                                             else:
                                                 st.error("Name is required.")
 
