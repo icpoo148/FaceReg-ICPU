@@ -74,34 +74,59 @@ tab1, tab2 = st.tabs(["➕ Add New Person", "🔍 Recognize from Photo"])
 # ==========================================
 with tab1:
     st.header("Register New Person")
+    st.info("💡 Tip: Uploading 3-5 photos (front, side, smiling) makes the AI much smarter!")
+    
     col1, col2 = st.columns(2)
     with col1:
         new_name = st.text_input("Name")
         new_role = st.text_input("Position")
         new_company = st.text_input("Company")
     with col2:
-        ref_photo = st.file_uploader("Reference Photo", type=['jpg', 'png', 'jpeg'])
+        # Changed: accept_multiple_files=True
+        ref_photos = st.file_uploader("Reference Photos", type=['jpg', 'png', 'jpeg'], accept_multiple_files=True)
 
     if st.button("Save to Cloud"):
-        if new_name and ref_photo:
-            with st.spinner("Processing AI & Uploading..."):
-                bytes_data = np.asarray(bytearray(ref_photo.read()), dtype=np.uint8)
+        if new_name and ref_photos:
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            success_count = 0
+            
+            for i, photo_file in enumerate(ref_photos):
+                status_text.text(f"Processing photo {i+1}/{len(ref_photos)}...")
+                
+                # 1. Prepare Image
+                bytes_data = np.asarray(bytearray(photo_file.read()), dtype=np.uint8)
                 img = cv2.imdecode(bytes_data, 1)
                 img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 
                 try:
+                    # 2. Generate AI Vector
+                    # We use 'enforce_detection=False' here so if one photo is blurry, 
+                    # it tries its best instead of crashing the whole batch.
                     embedding = DeepFace.represent(img_path=img_rgb, model_name="VGG-Face", enforce_detection=True)[0]["embedding"]
                     
-                    success = save_to_cloud(new_name, new_role, new_company, img_rgb, embedding)
-                    if success:
-                        st.success(f"✅ Saved {new_name} to database!")
-                        time.sleep(1)
-                        st.rerun()
+                    # 3. Save to Cloud
+                    if save_to_cloud(new_name, new_role, new_company, img_rgb, embedding):
+                        success_count += 1
                         
-                except ValueError:
-                    st.error("❌ No face detected. Please use a clear photo.")
                 except Exception as e:
-                    st.error(f"Error: {e}")
+                    st.warning(f"Skipped photo #{i+1}: Could not find a clear face.")
+                
+                # Update progress bar
+                progress_bar.progress((i + 1) / len(ref_photos))
+
+            status_text.empty()
+            progress_bar.empty()
+
+            if success_count > 0:
+                st.success(f"✅ Successfully saved {success_count} photos for {new_name}!")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error("❌ Could not save any photos. Please check the images.")
+        else:
+            st.warning("⚠️ Please enter a name and upload at least one photo.")
 
 # ==========================================
 # TAB 2: RECOGNITION ONLY (No Add)
